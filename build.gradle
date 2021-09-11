@@ -1,0 +1,16 @@
+plugins {
+    id 'java'
+}
+
+group 'dev.phonis'
+version '1.0-SNAPSHOT'
+
+jar {
+    archiveBaseName.set('Blober')
+    archiveClassifier.set('')
+    archiveVersion.set('')
+
+    manifest {
+        attributes 'Main-Class': 'dev.phonis.blober.Main'
+    }
+}
