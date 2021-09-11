@@ -14,7 +14,7 @@ import java.util.zip.GZIPOutputStream;
 public class Main {
 
     public static void main(String[] args) throws IOException, NoSuchPaddingException, NoSuchAlgorithmException, InvalidKeyException, InvalidKeySpecException, InvalidAlgorithmParameterException {
-        if (args.length < 2) {
+        if (args.length < 3) {
             System.out.println("Usage: (mode) (file) (password)");
             System.exit(-1);
         }
@@ -79,12 +79,12 @@ public class Main {
     }
 
     private static Cipher generateCipher(String password, FileOutputStream fileOut) throws NoSuchAlgorithmException, InvalidKeySpecException, NoSuchPaddingException, InvalidKeyException, IOException, InvalidAlgorithmParameterException {
-        SecureRandom sr = SecureRandom.getInstanceStrong();
+        SecureRandom secureRandom = SecureRandom.getInstanceStrong();
         byte[] salt = new byte[16];
         byte[] iv = new byte[16];
 
-        sr.nextBytes(salt);
-        sr.nextBytes(iv);
+        secureRandom.nextBytes(salt);
+        secureRandom.nextBytes(iv);
 
         fileOut.write(salt);
         fileOut.write(iv);
