@@ -58,8 +58,6 @@ public class Main {
     }
 
     private static Cipher getCipherFromSaltAndIV(String password, byte[] salt, byte[] iv, int mode) throws NoSuchPaddingException, NoSuchAlgorithmException, InvalidKeySpecException, InvalidKeyException, InvalidAlgorithmParameterException {
-        assert salt.length == 16;
-
         SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
         KeySpec spec = new PBEKeySpec(password.toCharArray(), salt, 65536, 256);
         SecretKey secretKey = new SecretKeySpec(
@@ -85,7 +83,6 @@ public class Main {
 
         secureRandom.nextBytes(salt);
         secureRandom.nextBytes(iv);
-
         fileOut.write(salt);
         fileOut.write(iv);
 
@@ -94,6 +91,8 @@ public class Main {
 
     private static void blobFile(File toBlob, DataOutputStream dos) throws IOException {
         if (toBlob.isDirectory()) {
+            System.out.println("Blobbing directory: " + toBlob.getName());
+
             File[] files = toBlob.listFiles();
 
             Main.writeDirHeader(dos, toBlob.getName(), files == null ? 0 : files.length);
@@ -104,6 +103,7 @@ public class Main {
                 Main.blobFile(file, dos);
             }
         } else {
+            System.out.println("Blobbing file: " + toBlob.getName());
             Main.writeFileHeader(dos, toBlob.getName(), toBlob.length());
             Main.writeFile(dos, toBlob);
         }
