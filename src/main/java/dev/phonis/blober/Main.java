@@ -123,7 +123,7 @@ public class Main {
 
     private static void writeFile(DataOutputStream dos, File toBlob) throws IOException {
         FileInputStream fileIn = new FileInputStream(toBlob);
-        byte[] buffer = new byte[4096];
+        byte[] buffer = new byte[1024];
         int bytesRead;
 
         while ((bytesRead = fileIn.read(buffer)) >= 0) {
