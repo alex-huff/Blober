@@ -11,6 +11,7 @@ import java.security.*;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.KeySpec;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.zip.GZIPInputStream;
@@ -21,7 +22,83 @@ public class Main {
     private static final char pathSeparator = System.getProperty("file.separator").charAt(0);
     private static SecureRandom secureRandom;
     private static final BlockingQueue<File> fileOutQueue = new LinkedBlockingQueue<>();
-    private static final ExecutorService threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+    private static final int nThreads = Runtime.getRuntime().availableProcessors();
+    private static final ExecutorService threadPool = new ThreadPoolExecutor(
+        Main.nThreads,
+        Main.nThreads,
+        0L,
+        TimeUnit.MILLISECONDS,
+        new PriorityBlockingQueue<>(
+            1,
+            Comparator.comparingLong(
+                runnable -> {
+                    if (runnable instanceof PriorityFuture<?> priorityFuture) return priorityFuture.getPriority();
+
+                    return Long.MAX_VALUE;
+                }
+            ).reversed()
+        )
+    ) {
+
+        @Override
+        public <T> RunnableFuture<T> newTaskFor(Runnable runnable, T ignored) {
+            RunnableFuture<T> runnableFuture = super.newTaskFor(runnable, ignored);
+
+            if (runnable instanceof FileRunnable fileRunnable)
+                return new PriorityFuture<>(
+                    runnableFuture,
+                    fileRunnable.getToProcess().length()
+                );
+
+            return runnableFuture;
+        }
+
+    };
+
+    private record PriorityFuture<T>(RunnableFuture<T> delegate, long priority) implements RunnableFuture<T> {
+
+        public long getPriority() {
+            return priority;
+        }
+
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            return delegate.cancel(mayInterruptIfRunning);
+        }
+
+        public boolean isCancelled() {
+            return delegate.isCancelled();
+        }
+
+        public boolean isDone() {
+            return delegate.isDone();
+        }
+
+        public T get() throws InterruptedException, ExecutionException {
+            return delegate.get();
+        }
+
+        public T get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException {
+            return delegate.get();
+        }
+
+        public void run() {
+            delegate.run();
+        }
+
+    }
+
+    private record FileRunnable(File toProcess, Runnable toRun) implements Runnable {
+
+        public File getToProcess() {
+            return this.toProcess;
+        }
+
+        @Override
+        public void run() {
+            this.toRun.run();
+        }
+
+    }
 
     static {
         try {
@@ -50,8 +127,8 @@ public class Main {
     private static void constructFileFromBlobWithPassword(String fileName, final String password) throws IOException, InvalidAlgorithmParameterException, NoSuchPaddingException, NoSuchAlgorithmException, InvalidKeySpecException, InvalidKeyException, ExecutionException, InterruptedException {
         File file = new File(fileName).getAbsoluteFile();
         Path filePath = file.toPath().toRealPath();
+        final Path parentDirectory = filePath.getParent();
         File tempDirectoryStructure = Files.createTempFile("blober", "temp").toFile();
-        final Path parentPath = filePath.getParent();
         InputStream blobIn = new FileInputStream(file);
 
         Main.readFile(new DataInputStream(blobIn), tempDirectoryStructure);
@@ -69,39 +146,45 @@ public class Main {
 
         int numFiles = isDirectory ? directoryStructure.getNumFiles() : 1;
         dis = new DataInputStream(blobIn); // switch to non-decompressed/decrypted
-        List<CompletableFuture<?>> fileFutures = new ArrayList<>();
+        List<Future<?>> fileFutures = new ArrayList<>();
 
         if (isDirectory) {
             System.out.println("Creating directories...");
-            directoryStructure.makeDirs(parentPath);
+            directoryStructure.makeDirs(parentDirectory);
             System.out.println("Created directories.");
         }
 
         System.out.println("Unblobbing " + numFiles + " file" + (numFiles == 1 ? "" : "s") + ".");
-        System.out.flush();
+        System.out.println("Creating temp files...");
 
         for (int i = 0; i < numFiles; i++) {
             final File tempFile = Files.createTempFile("blober", "temp").toFile();
 
             Main.readFile(dis, tempFile);
             fileFutures.add(
-                CompletableFuture.runAsync(
-                    () -> Main.decryptAndDecompressFile(parentPath, tempFile, password),
-                    Main.threadPool
+                Main.threadPool.submit(
+                    new FileRunnable(tempFile, () -> Main.decryptAndDecompressFile(parentDirectory, tempFile, password))
                 )
             );
         }
 
+        System.out.println("Created temp files.");
+        System.out.flush();
         dis.close();
-        CompletableFuture.allOf(fileFutures.toArray(CompletableFuture[]::new)).get();
+
+        for (Future<?> future : fileFutures) {
+            future.get();
+        }
+
         Main.threadPool.shutdown();
     }
 
     private static void generateBlobFromFileWithPassword(String fileName, String password) throws IOException, InterruptedException, InvalidAlgorithmParameterException, NoSuchPaddingException, NoSuchAlgorithmException, InvalidKeySpecException, InvalidKeyException {
         File file = new File(fileName).getAbsoluteFile();
         Path filePath = file.toPath().toRealPath();
+        Path parentDirectory = filePath.getParent();
         File tempDirectoryStructure = Files.createTempFile("blober", "temp").toFile();
-        DirectoryStructure directoryStructure = Main.generateBlobRecursively(filePath.getParent(), file, password);
+        DirectoryStructure directoryStructure = Main.generateBlobRecursively(parentDirectory, file, password);
         boolean isDirectory = directoryStructure != null;
         int numFiles = isDirectory ? directoryStructure.getNumFiles() : 1;
 
@@ -143,7 +226,7 @@ public class Main {
         Main.threadPool.shutdown();
     }
 
-    private static DirectoryStructure generateBlobRecursively(Path parentDirectory, final File file, final String password) {
+    private static DirectoryStructure generateBlobRecursively(final Path parentDirectory, final File file, final String password) {
         DirectoryStructure directoryStructure;
 
         if (file.isDirectory()) {
@@ -162,20 +245,16 @@ public class Main {
             }
         } else {
             directoryStructure = null;
-            final String relativeFileName = parentDirectory.relativize(
-                file.toPath()
-            ).toString().replace(
-                Main.pathSeparator,
-                '/'
-            );
 
-            Main.threadPool.submit(() -> Main.encryptAndCompressFile(file, password, relativeFileName));
+            Main.threadPool.submit(
+                new FileRunnable(file, () -> Main.encryptAndCompressFile(parentDirectory, file, password))
+            );
         }
 
         return directoryStructure;
     }
 
-    private static void decryptAndDecompressFile(Path parentPath, File file, String password) {
+    private static void decryptAndDecompressFile(Path parentDirectory, File file, String password) {
         boolean failed = false;
 
         try (InputStream fileIn = new FileInputStream(file)) {
@@ -183,7 +262,7 @@ public class Main {
                 Main.decryptAndDecompressInputStream(fileIn, password)
             );
             String relativeFileName = dis.readUTF();
-            File outFile = parentPath.resolve(relativeFileName).toFile();
+            File outFile = parentDirectory.resolve(relativeFileName).toFile();
 
             Main.readFileNoLength(dis, outFile);
             dis.close();
@@ -197,7 +276,7 @@ public class Main {
         if (failed) System.exit(-1);
     }
 
-    private static void encryptAndCompressFile(File file, String password, String relativeFileName) {
+    private static void encryptAndCompressFile(Path parentDirectory, File file, String password) {
         File outFile;
         boolean failed = false;
 
@@ -212,6 +291,12 @@ public class Main {
         try (OutputStream fileOut = new FileOutputStream(outFile)) {
             DataOutputStream dos = new DataOutputStream(
                 Main.encryptAndCompressOutputStream(fileOut, password)
+            );
+            String relativeFileName = parentDirectory.relativize(
+                file.toPath()
+            ).toString().replace(
+                Main.pathSeparator,
+                '/'
             );
 
             dos.writeUTF(relativeFileName);
