@@ -155,7 +155,7 @@ public class Main {
         }
 
         System.out.println("Unblobbing " + numFiles + " file" + (numFiles == 1 ? "" : "s") + ".");
-        System.out.println("Creating temp files...");
+        System.out.flush();
 
         for (int i = 0; i < numFiles; i++) {
             final File tempFile = Files.createTempFile("blober", "temp").toFile();
@@ -168,8 +168,6 @@ public class Main {
             );
         }
 
-        System.out.println("Created temp files.");
-        System.out.flush();
         dis.close();
 
         for (Future<?> future : fileFutures) {
