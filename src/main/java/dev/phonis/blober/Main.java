@@ -41,7 +41,7 @@ public class Main {
     ) {
 
         @Override
-        public <T> RunnableFuture<T> newTaskFor(Runnable runnable, T ignored) {
+        protected <T> RunnableFuture<T> newTaskFor(Runnable runnable, T ignored) {
             RunnableFuture<T> runnableFuture = super.newTaskFor(runnable, ignored);
 
             if (runnable instanceof FileRunnable fileRunnable)
