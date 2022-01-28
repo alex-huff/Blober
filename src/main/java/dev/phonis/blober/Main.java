@@ -17,6 +17,43 @@ import java.util.concurrent.*;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
+/*
+    TODO:
+        When generating files from a blob, instead of writing encrypted/compressed data to temp files,
+        send blob file pointer with runnable. This can be done quickly since skipping over data in
+        files is efficient. This removes the need for hacky implementation of priority-based ExecutorService
+        since we can sort the tasks on the spot, since generating them will be pretty quick.
+        The length of the to-be decompressed/decrypted file does not need to be given to the runnable since
+        GZIPInputStream will know when to stop because of the presence of a trailer.
+        ...
+        Blobbing files can then be easily rewritten to not need the priority-based ExecutorService by making
+        FileRunnable comparable, and sorting a list of them after recursing over the file/directory given.
+        ...
+        Now that generating files from a blob will produce runnables that are not tied to a specific file,
+        FileRunnable cannot be used for sorting these tasks. A more generic PriorityRunnable may suit both
+        blobbing/un-blobbing well and can replace FileRunnable.
+        ...
+        Something like this?
+
+            private record PriorityRunnable(Runnable runnable, long priority) implements Runnable, Comparable<PriorityRunnable> {
+
+                private static final Comparator<PriorityRunnable> priorityRunnableComparator = Comparator.comparingLong(
+                    PriorityRunnable::priority
+                ).reversed();
+
+                @Override
+                public void run() {
+                    this.runnable.run();
+                }
+
+                @Override
+                public int compareTo(PriorityRunnable o) {
+                    return PriorityRunnable.priorityRunnableComparator.compare(this, o);
+                }
+
+            }
+ */
+
 public class Main {
 
     private static final char pathSeparator = System.getProperty("file.separator").charAt(0);
