@@ -26,6 +26,12 @@ import java.util.zip.GZIPOutputStream;
         The length of the to-be decompressed/decrypted file does not need to be given to the runnable since
         GZIPInputStream will know when to stop because of the presence of a trailer.
         ...
+        It is worth noting that doing this will make adapting Blober for use over a network more challenging since
+        multiple processes are reading from the same file through multiple input streams, something that can't
+        really be replicated on a SocketInputStream without first writing all data to a file or a buffer. The current
+        implementation, though, would work just fine for use over a network since data received over the network
+        is split up into temporary files, where it is then processed.
+        ...
         Blobbing files can then be easily rewritten to not need the priority-based ExecutorService by making
         FileRunnable comparable, and sorting a list of them after recursing over the file/directory given.
         ...
