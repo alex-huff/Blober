@@ -11,137 +11,38 @@ import java.security.*;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.KeySpec;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-/*
-    TODO:
-        When generating files from a blob, instead of writing encrypted/compressed data to temp files,
-        send blob file pointer with runnable. This can be done quickly since skipping over data in
-        files is efficient. This removes the need for hacky implementation of priority-based ExecutorService
-        since we can sort the tasks on the spot, since generating them will be pretty quick.
-        The length of the to-be decompressed/decrypted file does not need to be given to the runnable since
-        GZIPInputStream will know when to stop because of the presence of a trailer.
-        ...
-        It is worth noting that doing this will make adapting Blober for use over a network more challenging since
-        multiple processes are reading from the same file through multiple input streams, something that can't
-        really be replicated on a SocketInputStream without first writing all data to a file or a buffer. The current
-        implementation, though, would work just fine for use over a network since data received over the network
-        is split up into temporary files, where it is then processed.
-        ...
-        Blobbing files can then be easily rewritten to not need the priority-based ExecutorService by making
-        FileRunnable comparable, and sorting a list of them after recursing over the file/directory given.
-        ...
-        Now that generating files from a blob will produce runnables that are not tied to a specific file,
-        FileRunnable cannot be used for sorting these tasks. A more generic PriorityRunnable may suit both
-        blobbing/un-blobbing well and can replace FileRunnable.
-        ...
-        Something like this?
-
-            private record PriorityRunnable(Runnable runnable, long priority) implements Runnable, Comparable<PriorityRunnable> {
-
-                private static final Comparator<PriorityRunnable> priorityRunnableComparator = Comparator.comparingLong(
-                    PriorityRunnable::priority
-                ).reversed();
-
-                @Override
-                public void run() {
-                    this.runnable.run();
-                }
-
-                @Override
-                public int compareTo(PriorityRunnable o) {
-                    return PriorityRunnable.priorityRunnableComparator.compare(this, o);
-                }
-
-            }
- */
-
 public class Main {
+
+    private record PriorityRunnable(Runnable runnable, long priority) implements Runnable, Comparable<PriorityRunnable> {
+
+        private static final Comparator<PriorityRunnable> priorityRunnableComparator = Comparator.comparingLong(
+            PriorityRunnable::priority
+        ).reversed();
+
+        @Override
+        public void run() {
+            this.runnable.run();
+        }
+
+        @Override
+        public int compareTo(PriorityRunnable o) {
+            return PriorityRunnable.priorityRunnableComparator.compare(this, o);
+        }
+
+    }
 
     private static final char pathSeparator = System.getProperty("file.separator").charAt(0);
     private static SecureRandom secureRandom;
     private static final BlockingQueue<File> fileOutQueue = new LinkedBlockingQueue<>();
     private static final int nThreads = Runtime.getRuntime().availableProcessors();
-    private static final ExecutorService threadPool = new ThreadPoolExecutor(
-        Main.nThreads,
-        Main.nThreads,
-        0L,
-        TimeUnit.MILLISECONDS,
-        new PriorityBlockingQueue<>(
-            1,
-            Comparator.comparingLong(
-                runnable -> {
-                    if (runnable instanceof PriorityFuture<?> priorityFuture) return priorityFuture.getPriority();
-
-                    return Long.MAX_VALUE;
-                }
-            ).reversed()
-        )
-    ) {
-
-        @Override
-        protected <T> RunnableFuture<T> newTaskFor(Runnable runnable, T ignored) {
-            RunnableFuture<T> runnableFuture = super.newTaskFor(runnable, ignored);
-
-            if (runnable instanceof FileRunnable fileRunnable)
-                return new PriorityFuture<>(
-                    runnableFuture,
-                    fileRunnable.getToProcess().length()
-                );
-
-            return runnableFuture;
-        }
-
-    };
-
-    private record PriorityFuture<T>(RunnableFuture<T> delegate, long priority) implements RunnableFuture<T> {
-
-        public long getPriority() {
-            return priority;
-        }
-
-        public boolean cancel(boolean mayInterruptIfRunning) {
-            return delegate.cancel(mayInterruptIfRunning);
-        }
-
-        public boolean isCancelled() {
-            return delegate.isCancelled();
-        }
-
-        public boolean isDone() {
-            return delegate.isDone();
-        }
-
-        public T get() throws InterruptedException, ExecutionException {
-            return delegate.get();
-        }
-
-        public T get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException {
-            return delegate.get();
-        }
-
-        public void run() {
-            delegate.run();
-        }
-
-    }
-
-    private record FileRunnable(File toProcess, Runnable toRun) implements Runnable {
-
-        public File getToProcess() {
-            return this.toProcess;
-        }
-
-        @Override
-        public void run() {
-            this.toRun.run();
-        }
-
-    }
+    private static final ExecutorService threadPool = Executors.newFixedThreadPool(Main.nThreads);
 
     static {
         try {
@@ -168,28 +69,21 @@ public class Main {
     }
 
     private static void constructFileFromBlobWithPassword(String fileName, final String password) throws IOException, InvalidAlgorithmParameterException, NoSuchPaddingException, NoSuchAlgorithmException, InvalidKeySpecException, InvalidKeyException, ExecutionException, InterruptedException {
-        File file = new File(fileName).getAbsoluteFile();
+        final File file = new File(fileName).getAbsoluteFile();
         Path filePath = file.toPath().toRealPath();
         final Path parentDirectory = filePath.getParent();
-        File tempDirectoryStructure = Files.createTempFile("blober", "temp").toFile();
         InputStream blobIn = new FileInputStream(file);
-
-        Main.readFile(new DataInputStream(blobIn), tempDirectoryStructure);
-
-        InputStream tempDirectoryStructureIn = new FileInputStream(tempDirectoryStructure);
-        InputStream decryptedAndDecompressed = Main.decryptAndDecompressInputStream(tempDirectoryStructureIn, password);
-        DataInputStream dis = new DataInputStream(decryptedAndDecompressed);
+        DataInputStream dis = new DataInputStream(blobIn);
+        long directoryStructureLength = dis.readLong();
+        long currentFilePos = 8; // start at 8 since long is 8 bytes
+        InputStream decryptedAndDecompressed = Main.decryptAndDecompressInputStream(dis, password);
+        dis = new DataInputStream(decryptedAndDecompressed);
         boolean isDirectory = dis.readBoolean();
         DirectoryStructure directoryStructure = isDirectory ? DirectoryStructure.readFromDataInputStream(dis) : null;
-
-        decryptedAndDecompressed.close();
-
-        if (!tempDirectoryStructure.delete())
-            System.out.println("Could not delete temporary file: " + tempDirectoryStructure.getName());
-
         int numFiles = isDirectory ? directoryStructure.getNumFiles() : 1;
-        dis = new DataInputStream(blobIn); // switch to non-decompressed/decrypted
-        List<Future<?>> fileFutures = new ArrayList<>();
+        currentFilePos += directoryStructureLength;
+
+        dis.close();
 
         if (isDirectory) {
             System.out.println("Creating directories...");
@@ -197,21 +91,36 @@ public class Main {
             System.out.println("Created directories.");
         }
 
-        System.out.println("Unblobbing " + numFiles + " file" + (numFiles == 1 ? "" : "s") + ".");
+        System.out.println("Unblobbing " + numFiles + " file" + (numFiles == 1 ? "" : "s") + "...");
         System.out.flush();
 
-        for (int i = 0; i < numFiles; i++) {
-            final File tempFile = Files.createTempFile("blober", "temp").toFile();
+        List<PriorityRunnable> tasks = new ArrayList<>();
+        List<Future<?>> fileFutures = new ArrayList<>();
+        blobIn = new FileInputStream(file);
+        dis = new DataInputStream(blobIn);
+        long currentFileLength;
 
-            Main.readFile(dis, tempFile);
-            fileFutures.add(
-                Main.threadPool.submit(
-                    new FileRunnable(tempFile, () -> Main.decryptAndDecompressFile(parentDirectory, tempFile, password))
+        dis.skipNBytes(currentFilePos);
+
+        for (int i = 0; i < numFiles; i++) {
+            currentFileLength = dis.readLong();
+            currentFilePos += 8;
+            final long filePosCopy = currentFilePos;
+
+            tasks.add(
+                new PriorityRunnable(
+                    () -> Main.decryptAndDecompressFile(parentDirectory, file, filePosCopy, password),
+                    currentFileLength
                 )
             );
+
+            dis.skipNBytes(currentFileLength);
+            currentFilePos += currentFileLength;
         }
 
         dis.close();
+        Collections.sort(tasks);
+        tasks.forEach(task -> fileFutures.add(Main.threadPool.submit(task)));
 
         for (Future<?> future : fileFutures) {
             future.get();
@@ -225,11 +134,21 @@ public class Main {
         Path filePath = file.toPath().toRealPath();
         Path parentDirectory = filePath.getParent();
         File tempDirectoryStructure = Files.createTempFile("blober", "temp").toFile();
-        DirectoryStructure directoryStructure = Main.generateBlobRecursively(parentDirectory, file, password);
+        List<PriorityRunnable> tasks = new ArrayList<>();
+
+        System.out.println("Generating tasks...");
+
+        DirectoryStructure directoryStructure = Main.generateBlobRecursively(tasks, parentDirectory, file, password);
+
+        System.out.println("Sorting tasks...");
+        Collections.sort(tasks);
+        System.out.println("Scheduling tasks...");
+        tasks.forEach(Main.threadPool::submit);
+
         boolean isDirectory = directoryStructure != null;
         int numFiles = isDirectory ? directoryStructure.getNumFiles() : 1;
 
-        System.out.println("Blobbing " + numFiles + " file" + (numFiles == 1 ? "" : "s") + ".");
+        System.out.println("Blobbing " + numFiles + " file" + (numFiles == 1 ? "" : "s") + "...");
         System.out.flush();
 
         int currentFile = 0;
@@ -247,7 +166,7 @@ public class Main {
         dos = new DataOutputStream(blobOut); // switch to non-compressed/encrypted
 
         dos.writeLong(tempDirectoryStructure.length());
-        Main.writeFileNoLength(dos, tempDirectoryStructure);
+        Main.writeFile(dos, tempDirectoryStructure);
 
         if (!tempDirectoryStructure.delete())
             System.out.println("Could not delete temporary file: " + tempDirectoryStructure.getName());
@@ -256,7 +175,7 @@ public class Main {
             File toWrite = Main.fileOutQueue.take();
 
             dos.writeLong(toWrite.length());
-            Main.writeFileNoLength(dos, toWrite);
+            Main.writeFile(dos, toWrite);
 
             if (!toWrite.delete()) System.out.println("Could not delete temporary file: " + toWrite.getName());
 
@@ -267,7 +186,7 @@ public class Main {
         Main.threadPool.shutdown();
     }
 
-    private static DirectoryStructure generateBlobRecursively(final Path parentDirectory, final File file, final String password) {
+    private static DirectoryStructure generateBlobRecursively(List<PriorityRunnable> tasks, final Path parentDirectory, final File file, final String password) {
         DirectoryStructure directoryStructure;
 
         if (file.isDirectory()) {
@@ -277,7 +196,7 @@ public class Main {
             if (files == null) return directoryStructure;
 
             for (File subFile : files) {
-                DirectoryStructure subFileDirectoryStructure = Main.generateBlobRecursively(parentDirectory, subFile, password);
+                DirectoryStructure subFileDirectoryStructure = Main.generateBlobRecursively(tasks, parentDirectory, subFile, password);
 
                 if (subFileDirectoryStructure != null)
                     directoryStructure.addSubFile(subFileDirectoryStructure);
@@ -287,29 +206,27 @@ public class Main {
         } else {
             directoryStructure = null;
 
-            Main.threadPool.submit(
-                new FileRunnable(file, () -> Main.encryptAndCompressFile(parentDirectory, file, password))
-            );
+            tasks.add(new PriorityRunnable(() -> Main.encryptAndCompressFile(parentDirectory, file, password), file.length()));
         }
 
         return directoryStructure;
     }
 
-    private static void decryptAndDecompressFile(Path parentDirectory, File file, String password) {
+    private static void decryptAndDecompressFile(Path parentDirectory, File file, long filePos, String password) {
         boolean failed = false;
 
         try (InputStream fileIn = new FileInputStream(file)) {
+            fileIn.skipNBytes(filePos);
+
             DataInputStream dis = new DataInputStream(
                 Main.decryptAndDecompressInputStream(fileIn, password)
             );
             String relativeFileName = dis.readUTF();
             File outFile = parentDirectory.resolve(relativeFileName).toFile();
 
-            Main.readFileNoLength(dis, outFile);
+            Main.readFile(dis, outFile);
             dis.close();
             System.out.println("Created file: " + relativeFileName);
-
-            if (!file.delete()) System.out.println("Could not delete temporary file: " + file.getName());
         } catch (IOException | InvalidAlgorithmParameterException | NoSuchPaddingException | NoSuchAlgorithmException | InvalidKeySpecException | InvalidKeyException e) {
             failed = true;
         }
@@ -341,7 +258,7 @@ public class Main {
             );
 
             dos.writeUTF(relativeFileName);
-            Main.writeFileNoLength(dos, file);
+            Main.writeFile(dos, file);
             dos.close();
             Main.fileOutQueue.put(outFile);
             System.out.println("Blobbed file: " + relativeFileName);
@@ -401,7 +318,7 @@ public class Main {
         return Main.getCipherFromSaltAndIV(password, salt, iv, Cipher.ENCRYPT_MODE);
     }
 
-    private static void writeFileNoLength(OutputStream outputStream, File toWrite) throws IOException {
+    private static void writeFile(OutputStream outputStream, File toWrite) throws IOException {
         try (InputStream fileIn = new FileInputStream(toWrite)) {
             byte[] buffer = new byte[1024];
             int bytesRead;
@@ -412,25 +329,7 @@ public class Main {
         }
     }
 
-    private static void readFile(DataInputStream dis, File newFile) throws IOException {
-        long fileLength = dis.readLong();
-
-        try (OutputStream fileOut = new FileOutputStream(newFile)) {
-            byte[] buffer = new byte[1024];
-            long bytesLeft = fileLength;
-
-            while (bytesLeft > 0) {
-                long toRead = Math.min(bytesLeft, buffer.length);
-                int numRead = dis.read(buffer, 0, (int) toRead);
-
-                fileOut.write(buffer, 0, numRead);
-
-                bytesLeft -= numRead;
-            }
-        }
-    }
-
-    private static void readFileNoLength(InputStream inputStream, File newFile) throws IOException {
+    private static void readFile(InputStream inputStream, File newFile) throws IOException {
         try (OutputStream fileOut = new FileOutputStream(newFile)) {
             byte[] buffer = new byte[1024];
             int bytesRead;
